@@ -94,11 +94,19 @@ def _normalizar_medida(raw: str) -> str:
         return "kg"
     if r in ("g", "gr", "grama", "gramas"):
         return "g"
-    if r in ("l", "litro", "litros"):
+    if r in ("l", "lt", "litro", "litros"):
         return "l"
     if r == "ml":
         return "ml"
-    return "und"  # UNIT, PCT, FARDO, etc.
+    return "und"  # UNIT, UNIT, BOX, PACK, FARDO, PCT, etc.
+
+
+_RE_PIPE_SUFFIX = re.compile(r"\s*\|[^|]+\|.*$")
+
+
+def _limpar_nome_sku(nome: str) -> str:
+    """Remove sufixos do tipo |KG|, |UND|, |FUNCIONARIOS| do nome do SKU Atlas."""
+    return _RE_PIPE_SUFFIX.sub("", nome).strip()
 
 
 @st.cache_data(ttl=1800, show_spinner="🔗 Carregando preços do Atlas...")
@@ -145,7 +153,11 @@ def carregar_precos_atlas() -> dict:
         for nome, medida, preco in rows:
             if not nome or not preco:
                 continue
-            out[_norm(nome)] = {
+            nome_limpo = _limpar_nome_sku(nome)
+            chave = _norm(nome_limpo)
+            if not chave:
+                continue
+            out[chave] = {
                 "custo_unit": float(preco),
                 "unidade": _normalizar_medida(medida),
                 "qty_rend": 1.0,
