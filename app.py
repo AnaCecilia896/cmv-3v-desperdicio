@@ -84,12 +84,86 @@ def _cluster_motivo(motivo: str) -> str:
 
 
 # ============================================================
-# RECEITAS — pra valorizar
+# PREÇOS — Atlas (SKUs reais) + CSV (receitas/preparos)
 # ============================================================
+
+def _normalizar_medida(raw: str) -> str:
+    """Converte medida Atlas para o padrão do app (kg/g/l/ml/und)."""
+    r = (raw or "").lower().strip()
+    if r in ("kg", "kilo", "kilos", "quilos"):
+        return "kg"
+    if r in ("g", "gr", "grama", "gramas"):
+        return "g"
+    if r in ("l", "litro", "litros"):
+        return "l"
+    if r == "ml":
+        return "ml"
+    return "und"  # UNIT, PCT, FARDO, etc.
+
+
+@st.cache_data(ttl=1800, show_spinner="🔗 Carregando preços do Atlas...")
+def carregar_precos_atlas() -> dict:
+    """Busca preços reais de SKUs do Atlas (Supabase).
+
+    Requer st.secrets["ATLAS_DSN"]. Retorna {} se não configurado.
+    Hierarquia de preço: vw_average_prices > sku_item_suppliers > sku_item_price_history.
+    """
+    dsn = st.secrets.get("ATLAS_DSN", "")
+    if not dsn:
+        return {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(dsn)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT
+                s.name,
+                s.measure,
+                COALESCE(vap.last_price, ps.unit_price, ph.unit_price)::float AS preco_unit
+            FROM sku_items s
+            LEFT JOIN vw_average_prices vap
+                ON vap.sku_item_id = s.sync_id
+            LEFT JOIN (
+                SELECT DISTINCT ON (sku_item_id) sku_item_id, unit_price
+                FROM sku_item_suppliers
+                WHERE active = true AND unit_price IS NOT NULL
+                ORDER BY sku_item_id, price_updated_at DESC
+            ) ps ON ps.sku_item_id = s.id
+            LEFT JOIN (
+                SELECT DISTINCT ON (sku_item_id) sku_item_id, unit_price
+                FROM sku_item_price_history
+                ORDER BY sku_item_id, recorded_at DESC
+            ) ph ON ph.sku_item_id = s.id
+            WHERE s.deleted_at IS NULL
+              AND COALESCE(vap.last_price, ps.unit_price, ph.unit_price) IS NOT NULL
+            ORDER BY s.name
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = {}
+        for nome, medida, preco in rows:
+            if not nome or not preco:
+                continue
+            out[_norm(nome)] = {
+                "custo_unit": float(preco),
+                "unidade": _normalizar_medida(medida),
+                "qty_rend": 1.0,
+                "nome_original": nome,
+                "fonte": "atlas",
+            }
+        return out
+    except Exception as exc:
+        st.warning(f"⚠️ Atlas: {exc}")
+        return {}
+
+
 @st.cache_data
 def carregar_receitas() -> dict:
-    """Retorna {nome_norm: (custo_unit, unidade_canonica, qty_rendimento)}.
-    Custo unit é em R$ por unidade do rendimento (kg, l, und).
+    """Retorna {nome_norm: {...}} a partir do CSV de receitas/preparos.
+
+    Usado como complemento ao Atlas para itens processados (aioli, bases, etc.)
+    que não são SKUs brutos.
     """
     if not RECEITAS_CSV.exists():
         return {}
@@ -100,7 +174,6 @@ def carregar_receitas() -> dict:
         if not nome:
             continue
         rend = str(r.get("Rendimento", "1 und")).strip().lower()
-        # Parse "0,92 KG" → (0.92, "kg")
         m = re.match(r"([\d.,]+)\s*([a-z]*)", rend)
         if not m:
             qty_rend, un_rend = 1.0, "und"
@@ -110,16 +183,7 @@ def carregar_receitas() -> dict:
             except ValueError:
                 qty_rend = 1.0
             un_raw = m.group(2)
-            if un_raw in ("kg", "k", "kilo", "kilos"):
-                un_rend = "kg"
-            elif un_raw in ("g", "gr", "grama", "gramas"):
-                un_rend = "g"
-            elif un_raw in ("l", "litro", "litros"):
-                un_rend = "l"
-            elif un_raw == "ml":
-                un_rend = "ml"
-            else:
-                un_rend = "und"
+            un_rend = _normalizar_medida(un_raw)
         try:
             custo_unit = float(r.get("Custo Unitário (R$)", 0) or 0)
         except (TypeError, ValueError):
@@ -128,8 +192,29 @@ def carregar_receitas() -> dict:
             "custo_unit": custo_unit,
             "unidade": un_rend,
             "qty_rend": qty_rend,
+            "nome_original": nome,
+            "fonte": "csv",
         }
     return out
+
+
+def carregar_precos_combinados() -> dict:
+    """Funde Atlas (SKUs brutos, prioridade) + CSV (receitas/preparos, fallback)."""
+    csv   = carregar_receitas()
+    atlas = carregar_precos_atlas()
+    # Atlas sobrescreve CSV onde há conflito (preço real > snapshot)
+    return {**csv, **atlas}
+
+
+def status_atlas() -> str:
+    """Retorna string de status da conexão Atlas."""
+    dsn = st.secrets.get("ATLAS_DSN", "")
+    if not dsn:
+        return "⬜ sem credencial"
+    precos = carregar_precos_atlas()
+    if precos:
+        return f"🟢 conectado ({len(precos)} SKUs)"
+    return "🔴 erro na conexão"
 
 
 def _qty_pra_unidade_receita(qty: float, qty_unidade: str, un_receita: str) -> float | None:
@@ -212,8 +297,8 @@ def carregar_desperdicio() -> pd.DataFrame:
         return float(m.group()) if m else None
     df["qty"] = df["qty_raw"].apply(_parse_qty)
 
-    # Valorizar
-    receitas = carregar_receitas()
+    # Valorizar — usa Atlas (preços reais) + CSV (receitas) combinados
+    receitas = carregar_precos_combinados()
     valor_rs = []
     status = []
     for _, r in df.iterrows():
@@ -258,6 +343,10 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
     st.caption("Cache de 10 min. Forçar reload no botão acima.")
+    st.markdown("---")
+    st.markdown("### Fonte de preços")
+    st.caption(f"Atlas: {status_atlas()}")
+    st.caption("CSV receitas: sempre ativo (fallback)")
 
 # Carregar
 try:
@@ -355,8 +444,8 @@ st.markdown("---")
 # ============================================================
 # ABAS
 # ============================================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔍 Por motivo", "📦 Top produtos", "📈 Tendência", "📋 Lançamentos"
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "🔍 Por motivo", "📦 Top produtos", "📈 Tendência", "📋 Lançamentos", "❓ Sem preço"
 ])
 
 # ---- Tab 1: Cluster ----
@@ -466,11 +555,53 @@ with tab4:
     )
     st.caption(f"{len(df_show)} de {len(df_f)} lançamentos.")
 
+# ---- Tab 5: Sem preço ----
+with tab5:
+    st.markdown("##### Produtos sem preço cadastrado")
+    st.caption(
+        "Itens lançados no formulário que não encontraram correspondência "
+        "nem no Atlas (SKUs) nem no CSV de receitas. "
+        "Use esta lista para identificar quais nomes precisam ser padronizados no formulário."
+    )
+    df_sem = df_f[df_f["status_valor"] == "sem_match"].copy()
+    if df_sem.empty:
+        st.success("✅ Todos os produtos do período têm preço mapeado!")
+    else:
+        ag_sem = (
+            df_sem.groupby("produto", dropna=False)
+            .agg(
+                n_lanc=("produto", "size"),
+                unidades=("unidade", lambda s: ", ".join(sorted(s.dropna().unique()))),
+                ultimo=("data", "max"),
+            )
+            .reset_index()
+            .sort_values("n_lanc", ascending=False)
+        )
+        ag_sem["ultimo"] = ag_sem["ultimo"].dt.strftime("%d/%m/%Y")
+        st.dataframe(
+            ag_sem.rename(columns={
+                "produto": "Produto (como digitado)",
+                "n_lanc": "Nº lançamentos",
+                "unidades": "Unidade(s)",
+                "ultimo": "Último lançamento",
+            }),
+            hide_index=True,
+            use_container_width=True,
+            height=400,
+        )
+        st.caption(
+            f"{len(ag_sem)} produto(s) distintos sem match · "
+            f"{len(df_sem)} lançamentos sem valorização no período filtrado."
+        )
+
 # ============================================================
 # RODAPÉ
 # ============================================================
 st.markdown("---")
+precos = carregar_precos_combinados()
+n_atlas = sum(1 for v in precos.values() if v.get("fonte") == "atlas")
+n_csv   = sum(1 for v in precos.values() if v.get("fonte") == "csv")
 st.caption(
     f"Total no banco: {len(df):,} lançamentos · ".replace(",", ".") +
-    f"Cache 10 min · Receitas valorizadas: {len(carregar_receitas())} no snapshot"
+    f"Preços: {n_atlas} SKUs do Atlas + {n_csv} receitas do CSV · Cache 30 min"
 )
