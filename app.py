@@ -498,12 +498,12 @@ with tab2:
                  valor_rs=("valor_rs", lambda s: float(s.dropna().sum())),
                  motivo_top=("cluster", lambda s: s.value_counts().index[0]))
             .reset_index()
-            .sort_values("valor_rs", ascending=False)
+            .sort_values("n", ascending=False)
             .head(n_top))
-    fig = px.bar(ag_p.iloc[::-1], x="valor_rs", y="produto", orientation="h",
-                 color="motivo_top", text="valor_rs",
-                 labels={"valor_rs": "R$ desperdiçado", "produto": "", "motivo_top": "Motivo"})
-    fig.update_traces(texttemplate="R$ %{text:,.0f}",
+    fig = px.bar(ag_p.iloc[::-1], x="n", y="produto", orientation="h",
+                 color="motivo_top", text="n",
+                 labels={"n": "Qtd desperdiçada", "produto": "", "motivo_top": "Motivo"})
+    fig.update_traces(texttemplate="%{text}",
                       textposition="outside")
     fig.update_layout(height=max(350, 25 * n_top), margin=dict(t=10, b=10, l=10, r=10))
     st.plotly_chart(fig, use_container_width=True)
