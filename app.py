@@ -363,14 +363,19 @@ with st.sidebar:
     st.caption("Cache de 10 min. Forçar reload no botão acima.")
     st.markdown("---")
     st.markdown("### Fonte de preços")
-    st.caption(f"Atlas: {status_atlas()}")
+    try:
+        st.caption(f"Atlas: {status_atlas()}")
+    except Exception as _e:
+        st.caption(f"Atlas: ⬜ sem credencial ({_e})")
     st.caption("CSV receitas: sempre ativo (fallback)")
 
 # Carregar
 try:
     df = carregar_desperdicio()
 except Exception as e:
-    st.error(f"❌ Erro: {e}")
+    import traceback
+    st.error(f"❌ Erro ao carregar dados: {e}")
+    st.code(traceback.format_exc())
     st.stop()
 
 if df.empty:
