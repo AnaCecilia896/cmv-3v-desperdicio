@@ -496,7 +496,7 @@ with tab2:
     ag_p = (df_f.groupby("produto", dropna=False)
             .agg(n=("produto", "size"),
                  valor_rs=("valor_rs", lambda s: float(s.dropna().sum())),
-                 motivo_top=("cluster", lambda s: s.value_counts().index[0]))
+                 motivo_top=("cluster", lambda s: s.value_counts().index[0] if len(s.value_counts()) > 0 else "❓ Outro"))
             .reset_index()
             .sort_values("n", ascending=False)
             .head(n_top))
