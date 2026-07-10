@@ -116,7 +116,10 @@ def carregar_precos_atlas() -> dict:
     Requer st.secrets["ATLAS_DSN"]. Retorna {} se não configurado.
     Hierarquia de preço: vw_average_prices > sku_item_suppliers > sku_item_price_history.
     """
-    dsn = st.secrets.get("ATLAS_DSN", "")
+    try:
+        dsn = st.secrets.get("ATLAS_DSN", "")
+    except Exception:
+        return {}
     if not dsn:
         return {}
     try:
@@ -220,7 +223,10 @@ def carregar_precos_combinados() -> dict:
 
 def status_atlas() -> str:
     """Retorna string de status da conexão Atlas."""
-    dsn = st.secrets.get("ATLAS_DSN", "")
+    try:
+        dsn = st.secrets.get("ATLAS_DSN", "")
+    except Exception:
+        return "⬜ sem credencial"
     if not dsn:
         return "⬜ sem credencial"
     precos = carregar_precos_atlas()
